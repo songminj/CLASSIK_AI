@@ -23,6 +23,7 @@ jpge
 venv
 pip-selfcheck.json
 .idea
+.data
 
 ### VisualStudioCode ###
 .vscode/*

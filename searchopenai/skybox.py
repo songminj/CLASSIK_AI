@@ -1,23 +1,50 @@
 import requests
+import boto3
+import pymysql
 import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import time
 
+# key 관리
 load_dotenv()
 client = OpenAI()
 SKYBOX_API_KEY = os.getenv("SKYBOX_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+openai.api_key = os.getenv("OPENAI_API_KEY")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 BASE_URL = 'https://backend.blockadelabs.com/api/v1/skybox'
+S3_URL = 'https://classik-bucket.s3.ap-northeast-2.amazonaws.com'
 RESULT_FOLDER = 'assets'
+BUCKET_NAME = 'classik-bucket'
 
 # 결과 폴더가 없으면 생성
 if not os.path.exists(RESULT_FOLDER):
     os.makedirs(RESULT_FOLDER)
 
+
+# S3연결하기 
+def s3_connection():
+    try:
+        s3 = boto3.client(
+            service_name="s3",
+            region_name="ap-northeast-2", # 자신이 설정한 bucket region
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        )
+    except Exception as e:
+        print(e)
+    else:
+        print("s3 bucket connected!")
+        return s3
+
+s3 = s3_connection()
+
+# DB 연결
+classik = pymysql.connect(host='127.0.0.1', user='root', password='0516', db='classik', charset='utf8')
+cursor = classik.cursor()
 
 def make_prompt(title):
     response = client.chat.completions.create(
@@ -49,8 +76,37 @@ def make_prompt(title):
     )
     return response.choices[0].message.content
 
+def s3_put_object(s3, bucket, filepath, video_id):
+    """
+    s3 bucket에 지정 파일 업로드
+    :param s3: 연결된 s3 객체(boto3 client)
+    :param bucket: 버킷명
+    :param filepath: 파일 위치
+    :param access_key: 저장 파일명
+    :return: 성공 시 True, 실패 시 False 반환
+    """
+    try:
+        s3.upload_file(
+            Filename=filepath,
+            Bucket=bucket,
+            Key=video_id,
+            ExtraArgs={"ContentType": "image/jpg"},
+        )
+    except Exception as e:
+        print(e)
+        return False
+    return True
 
-    
+
+
+def handle_upload_img(filename, video_id): # f = 파일명
+    data = open('assets/'+filename+'.jpg', 'rb')
+    # '로컬의 해당파일경로'+ 파일명 + 확장자
+    s3.upload_file(
+        Key=video_id, Body=data, ContentType='image/jpg')
+
+
+
 def download_file(url, filename):
     response = requests.get(url, stream=True)
     if response.status_code == 200:
@@ -58,12 +114,14 @@ def download_file(url, filename):
             for chunk in response.iter_content(1024):
                 file.write(chunk)
         print(f"Downloaded {filename}")
+        return filename
     else:
         print("Failed to download the file.")
+        return None
 
 
 
-def generate_skybox(prompt):
+def generate_skybox(title, prompt):
     headers = {
         'x-api-key': SKYBOX_API_KEY,
         'Content-Type': 'application/json'
@@ -88,10 +146,8 @@ def generate_skybox(prompt):
         while status != 'complete':
             response = requests.get(check_url, headers=headers)
             result = response.json()
-            # print(result)
             status = result["request"].get('status')
-            # print(f"Skybox requested with ID: {skybox_id}, Initial status: {status}")
-            time.sleep(6)
+            time.sleep(3)
         
         print(f"Skybox requested with ID: {skybox_id}, Initial status: {status}")
         
@@ -117,6 +173,7 @@ def generate_skybox(prompt):
                     if file_url:
                         filename = os.path.join(RESULT_FOLDER, f"{skybox_id}.jpg")
                         download_file(file_url, filename)
+                        return skybox_id
                     else:
                         print("File URL is not available.")
                     break
@@ -132,8 +189,36 @@ def generate_skybox(prompt):
     else:
         print("Failed to create skybox:", response.status_code, response.text)
 
+
+
+def update_vr_image_url(video_id, vr_image_url):
+    try:
+        sql = "UPDATE track SET vr_image_url = %s WHERE video_id = %s"
+        cursor.execute(sql, (vr_image_url, video_id))
+        classik.commit()
+        print(f"Updated vr_image_url for track ID {video_id}")
+    except Exception as e:
+        print("Failed to update database:", e)
+
+
+
 if __name__ == '__main__':
-    title = input("Enter prompt for skybox generation: ")
-    prompt = make_prompt(title)
-    print(prompt)
-    generate_skybox(prompt)
+    # track 테이블의 title을 가져와 Skybox 생성 및 저장
+    cursor.execute("SELECT track_id, video_id, title FROM track")
+    tracks = cursor.fetchall()
+    
+    for track_id, video_id, title in tracks:
+        prompt = make_prompt(title)
+        print(prompt)
+        filename = generate_skybox(title, prompt)
+        
+        if filename:
+            if s3_put_object(s3, BUCKET_NAME, f'./assets/{filename}.jpg', video_id):
+                vr_image_url = f"{S3_URL}/{video_id}"
+                print(vr_image_url)
+                update_vr_image_url(video_id, vr_image_url)
+
+            else:
+                print("Failed to upload image to S3 for track ID:", track_id)
+        print(track_id, " done!")
+    print("end !~~")
