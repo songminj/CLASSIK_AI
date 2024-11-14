@@ -17,7 +17,7 @@ def initialize_db():
     make_db()
     print("서버 시작시 최초로 실행될 DB초기화 코드")
 
-@app.get("/items/{search_item}")
+@app.get("/search/embed/{search_item}")
 def update_item(search_item: str):
     items = search(search_item)
     return {"items" : items}
